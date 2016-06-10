@@ -20,6 +20,7 @@ else
     cudaComputeCapability = deviceParams.major + deviceParams.minor/10
     LookupTable = nn.LookupTable
 end
+require('cudnn')
 require('nngraph')
 require('base')
 local ptb = require('data')
@@ -88,129 +89,59 @@ end
 
 local state_train, state_valid, state_test
 local model = {}
+model.rnns = create_network()
+
 local paramx, paramdx
-
-local function lstm(x, prev_c, prev_h)
-  -- Calculate all four gates in one go
-  local i2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(x)
-  local h2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(prev_h)
-  local gates = nn.CAddTable()({i2h, h2h})
-  
-  -- Reshape to (batch_size, n_gates, hid_size)
-  -- Then slize the n_gates dimension, i.e dimension 2
-  local reshaped_gates =  nn.Reshape(4,params.rnn_size)(gates)
-  local sliced_gates = nn.SplitTable(2)(reshaped_gates)
-  
-  -- Use select gate to fetch each gate and apply nonlinearity
-  local in_gate          = nn.Sigmoid()(nn.SelectTable(1)(sliced_gates))
-  local in_transform     = nn.Tanh()(nn.SelectTable(2)(sliced_gates))
-  local forget_gate      = nn.Sigmoid()(nn.SelectTable(3)(sliced_gates))
-  local out_gate         = nn.Sigmoid()(nn.SelectTable(4)(sliced_gates))
-
-  local next_c           = nn.CAddTable()({
-      nn.CMulTable()({forget_gate, prev_c}),
-      nn.CMulTable()({in_gate,     in_transform})
-  })
-  local next_h           = nn.CMulTable()({out_gate, nn.Tanh()(next_c)})
-
-  return next_c, next_h
-end
 
 local function create_network()
   local x                = nn.Identity()()
   local y                = nn.Identity()()
-  local prev_s           = nn.Identity()()
-  local i                = {[0] = LookupTable(params.vocab_size,
-                                                    params.rnn_size)(x)}
-  local next_s           = {}
-  local split         = {prev_s:split(2 * params.layers)}
-  for layer_idx = 1, params.layers do
-    local prev_c         = split[2 * layer_idx - 1]
-    local prev_h         = split[2 * layer_idx]
-    local dropped        = nn.Dropout(params.dropout)(i[layer_idx - 1])
-    local next_c, next_h = lstm(dropped, prev_c, prev_h)
-    table.insert(next_s, next_c)
-    table.insert(next_s, next_h)
-    i[layer_idx] = next_h
-  end
-  local h2y              = nn.Linear(params.rnn_size, params.vocab_size)
-  local dropped          = nn.Dropout(params.dropout)(i[params.layers])
-  local pred             = nn.LogSoftMax()(h2y(dropped))
-  local err              = nn.ClassNLLCriterion()({pred, y})
-  local module           = nn.gModule({x, y, prev_s},
-                                      {err, nn.Identity()(next_s)})
-  module:getParameters():uniform(-params.init_weight, params.init_weight)
-  return transfer_data(module)
-end
 
-local function setup()
-  print("Creating a RNN LSTM network.")
-  local core_network = create_network()
-  paramx, paramdx = core_network:getParameters()
-  model.s = {}
-  model.ds = {}
-  model.start_s = {}
-  for j = 0, params.seq_length do
-    model.s[j] = {}
-    for d = 1, 2 * params.layers do
-      model.s[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    end
-  end
-  for d = 1, 2 * params.layers do
-    model.start_s[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    model.ds[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-  end
-  model.core_network = core_network
-  model.rnns = g_cloneManyTimes(core_network, params.seq_length)
-  model.norm_dw = 0
-  model.err = transfer_data(torch.zeros(params.seq_length))
+  local embedding        = nn.LookupTable(params.vocab_size, params.rnn_size)(x)
+  local lstmout          = cudnn.LSTM(params.rnn_size, params.rnn_size, params.layers)(embedding)
+
+  local dropped          = nn.Dropout(params.dropout)(lstmout)
+  local flatten          = nn.View(-1, params.rnn_size)(dropped)
+  local pred             = cudnn.LogSoftMax()(nn.Linear(params.rnn_size, params.vocab_size)(flatten))
+  local err              = nn.ClassNLLCriterion()({pred, nn.View(-1)(y)})
+  local gmodule          = nn.gModule({x, y}, {err})
+  gmodule:getParameters():uniform(-params.init_weight, params.init_weight)
+
+  return transfer_data(gmodule)
 end
 
 local function reset_state(state)
   state.pos = 1
-  if model ~= nil and model.start_s ~= nil then
-    for d = 1, 2 * params.layers do
-      model.start_s[d]:zero()
-    end
-  end
 end
 
-local function reset_ds()
-  for d = 1, #model.ds do
-    model.ds[d]:zero()
-  end
+local function setup()
+  print("Creating a RNN LSTM network.")
+  paramx, paramdx = model.rnns:getParameters()
+  model.norm_dw = 0
 end
 
 local function fp(state)
-  g_replace_table(model.s[0], model.start_s)
-  if state.pos + params.seq_length > state.data:size(1) then
+
+  if state.pos + params.seq_length + 1 > state.data:size(1) then
     reset_state(state)
   end
-  for i = 1, params.seq_length do
-    local x = state.data[state.pos]
-    local y = state.data[state.pos + 1]
-    local s = model.s[i - 1]
-    model.err[i], model.s[i] = unpack(model.rnns[i]:forward({x, y, s}))
-    state.pos = state.pos + 1
-  end
-  g_replace_table(model.start_s, model.s[params.seq_length])
+
+  local x = state.data[{{state.pos, state.pos+params.seq_length}}]
+  local y = state.data[{{state.pos+1, state.pos+params.seq_length+1}}]
+  
+  model.err = model.rnns:forward({x, y})
+
   return model.err:mean()
 end
 
 local function bp(state)
   paramdx:zero()
-  reset_ds()
-  for i = params.seq_length, 1, -1 do
-    state.pos = state.pos - 1
-    local x = state.data[state.pos]
-    local y = state.data[state.pos + 1]
-    local s = model.s[i - 1]
-    local derr = transfer_data(torch.ones(1))
-    local tmp = model.rnns[i]:backward({x, y, s},
-                                       {derr, model.ds})[3]
-    g_replace_table(model.ds, tmp)
-    cutorch.synchronize()
-  end
+
+  local x = state.data[{{state.pos, state.pos+params.seq_length}}]
+  local y = state.data[{{state.pos+1, state.pos+params.seq_length+1}}]
+  
+  model.rnns:backward({x, y}, transfer_data(torch.ones(1)))
+
   state.pos = state.pos + params.seq_length
   model.norm_dw = paramdx:norm()
   if model.norm_dw > params.max_grad_norm then
@@ -252,8 +183,8 @@ end
 local function main()
   g_init_gpu(arg)
   state_train = {data=transfer_data(ptb.traindataset(params.batch_size))}
-  state_valid =  {data=transfer_data(ptb.validdataset(params.batch_size))}
-  state_test =  {data=transfer_data(ptb.testdataset(params.batch_size))}
+  state_valid = {data=transfer_data(ptb.validdataset(params.batch_size))}
+  state_test  = {data=transfer_data(ptb.testdataset(params.batch_size))}
   print("Network parameters:")
   print(params)
   local states = {state_train, state_valid, state_test}
