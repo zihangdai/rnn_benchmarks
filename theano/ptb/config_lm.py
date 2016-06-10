@@ -10,7 +10,7 @@ def prototype_lm():
     config['max_epochs'] = 6
     config['use_dropout'] = True
     config['lrate'] = 0.1
-    config['data_path'] = '/home/benchmark/code/rnn_exps/torch/ptb/lstm/data'
+    config['data_path'] = '/home/zander/SSD/rnn_benchmarks/torch/ptb/lstm/data'
     config['n_words'] = 10000
     return config
 
