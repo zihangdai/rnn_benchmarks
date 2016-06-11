@@ -92,18 +92,18 @@ local model = {}
 
 local paramx, paramdx
 
-local function set_lstm_init(lstm, hidden, cell)
-  assert(lstm)
-  if (not lstm.hiddenInput) or (not lstm.cellInput) then
-    lstm.hiddenInput = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
-    lstm.cellInput   = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
+local function set_init_value(to_model, from_model)
+  assert(to_model)
+  if (not to_model.hiddenInput) or (not to_model.cellInput) then
+    to_model.hiddenInput = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
+    to_model.cellInput   = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
   end
-  if hidden and cell then
-    lstm.hiddenInput:copy(hidden)
-    lstm.cellInput:copy(cell)
+  if from_model then
+    to_model.hiddenInput:copy(from_model.hiddenInput)
+    to_model.cellInput:copy(from_model.cellInput)
   else
-    lstm.hiddenInput:zero()
-    lstm.cellInput:zero()
+    to_model.hiddenInput:zero()
+    to_model.cellInput:zero()
   end
 end
 
@@ -113,6 +113,9 @@ local function LSTM(input_size, hidden_size, num_layer, dropout)
     lstm.dropout = dropout
     lstm:reset()
   end
+
+  lstm.hiddenInput = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
+  lstm.cellInput   = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
 
   return lstm
 end
@@ -138,7 +141,7 @@ model.rnns:getParameters():uniform(-params.init_weight, params.init_weight)
 local criterion = transfer_data(nn.ClassNLLCriterion())
 
 local function reset_state(state)
-  set_lstm_init(lstm)
+  set_init_value(lstm)
   state.pos = 1
 end
 
@@ -154,12 +157,13 @@ local function fp(state)
     reset_state(state)
   end
 
+  set_init_value(lstm, model)
   local x = state.data[{{state.pos, state.pos+params.seq_length-1}}]
   local y = state.data[{{state.pos+1, state.pos+params.seq_length}}]
   
   model.pred = model.rnns:forward(x)
   model.err = criterion:forward(model.pred, y:view(-1))
-  set_lstm_init(lstm, lstm.hiddenOutput, lstm.cellOutput)
+  set_init_value(model, lstm)
 
   return model.err
 end
