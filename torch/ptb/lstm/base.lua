@@ -12,6 +12,8 @@ function g_disable_dropout(node)
       node[i]:apply(g_disable_dropout)
     end
     return
+  else
+    node:evaluate()
   end
   if string.match(node.__typename, "Dropout") then
     node.train = false
@@ -24,6 +26,8 @@ function g_enable_dropout(node)
       node[i]:apply(g_enable_dropout)
     end
     return
+  else
+    node:training()
   end
   if string.match(node.__typename, "Dropout") then
     node.train = true
