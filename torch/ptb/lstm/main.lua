@@ -92,26 +92,57 @@ local model = {}
 
 local paramx, paramdx
 
+local function set_lstm_init(lstm, hidden, cell)
+  assert(lstm)
+  if (not lstm.hiddenInput) or (not lstm.cellInput) then
+    lstm.hiddenInput = transfer_data(torch.zeros(params.layers, params.rnn_size))
+    lstm.cellInput   = transfer_data(torch.zeros(params.layers, params.rnn_size))
+  end
+  if hidden and cell then
+    lstm.hiddenInput:copy(hidden)
+    lstm.cellInput:copy(cell)
+  else
+    lstm.hiddenInput:zero()
+    lstm.cellInput:zero()
+  end
+end
+
+local function LSTM(input_size, hidden_size, num_layer, dropout)
+  local lstm = cudnn.LSTM(input_size, hidden_size, num_layer)
+  if dropout > 0 then
+    lstm.dropout = dropout
+    lstm:reset()
+  end
+
+  return lstm
+end
+
+local lstm = LSTM(params.rnn_size, params.rnn_size, params.layers, params.dropout)
+
 local function create_network()
-  local x                = nn.Identity()()
-  local y                = nn.Identity()()
+  local x_model = nn.Sequential()
+  x_model:add(nn.LookupTable(params.vocab_size, params.rnn_size))
+  x_model:add(nn.Dropout(params.dropout))
+  x_model:add(lstm)
+  x_model:add(nn.Dropout(params.dropout))
+  x_model:add(nn.View(-1, params.rnn_size))
+  x_model:add(nn.Linear(params.rnn_size, params.vocab_size))
+  x_model:add(cudnn.LogSoftMax())
 
-  local embedding        = nn.LookupTable(params.vocab_size, params.rnn_size)(x)
-  local lstmout          = cudnn.LSTM(params.rnn_size, params.rnn_size, params.layers)(nn.Dropout(params.dropout)(embedding))
+  local y_model = nn.View(-1)
 
-  local dropped          = nn.Dropout(params.dropout)(lstmout)
-  local flatten          = nn.View(-1, params.rnn_size)(dropped)
-  local pred             = cudnn.LogSoftMax()(nn.Linear(params.rnn_size, params.vocab_size)(flatten))
-  local err              = nn.ClassNLLCriterion()({pred, nn.View(-1)(y)})
-  local gmodule          = nn.gModule({x, y}, {err})
+  local rnns = nn.Sequential()
+  rnns:add(nn.ParallelTable():add(x_model):add(y_model))
+  rnns:add(nn.ClassNLLCriterion())
 
-  return transfer_data(gmodule)
+  return transfer_data(rnns)
 end
 
 model.rnns = create_network()
 model.rnns:getParameters():uniform(-params.init_weight, params.init_weight)
 
 local function reset_state(state)
+  set_lstm_init(lstm)
   state.pos = 1
 end
 
@@ -131,6 +162,7 @@ local function fp(state)
   local y = state.data[{{state.pos+1, state.pos+params.seq_length+1}}]
   
   model.err = model.rnns:forward({x, y})
+  set_lstm_init(lstm, lstm.hiddenOutput[params.seq_length], lstm.cellOutput[params.seq_length])
 
   return model.err:mean()
 end
