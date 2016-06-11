@@ -95,8 +95,8 @@ local paramx, paramdx
 local function set_lstm_init(lstm, hidden, cell)
   assert(lstm)
   if (not lstm.hiddenInput) or (not lstm.cellInput) then
-    lstm.hiddenInput = transfer_data(torch.zeros(params.layers, params.rnn_size))
-    lstm.cellInput   = transfer_data(torch.zeros(params.layers, params.rnn_size))
+    lstm.hiddenInput = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
+    lstm.cellInput   = transfer_data(torch.zeros(params.layers, params.batch_size, params.rnn_size))
   end
   if hidden and cell then
     lstm.hiddenInput:copy(hidden)
@@ -120,26 +120,22 @@ end
 local lstm = LSTM(params.rnn_size, params.rnn_size, params.layers, params.dropout)
 
 local function create_network()
-  local x_model = nn.Sequential()
-  x_model:add(nn.LookupTable(params.vocab_size, params.rnn_size))
-  x_model:add(nn.Dropout(params.dropout))
-  x_model:add(lstm)
-  x_model:add(nn.Dropout(params.dropout))
-  x_model:add(nn.View(-1, params.rnn_size))
-  x_model:add(nn.Linear(params.rnn_size, params.vocab_size))
-  x_model:add(cudnn.LogSoftMax())
-
-  local y_model = nn.View(-1)
-
   local rnns = nn.Sequential()
-  rnns:add(nn.ParallelTable():add(x_model):add(y_model))
-  rnns:add(nn.ClassNLLCriterion())
+  rnns:add(nn.LookupTable(params.vocab_size, params.rnn_size))
+  rnns:add(nn.Dropout(params.dropout))
+  rnns:add(lstm)
+  rnns:add(nn.Dropout(params.dropout))
+  rnns:add(nn.View(-1, params.rnn_size))
+  rnns:add(nn.Linear(params.rnn_size, params.vocab_size))
+  rnns:add(cudnn.LogSoftMax())
 
   return transfer_data(rnns)
 end
 
 model.rnns = create_network()
 model.rnns:getParameters():uniform(-params.init_weight, params.init_weight)
+
+local criterion = nn.ClassNLLCriterion()
 
 local function reset_state(state)
   set_lstm_init(lstm)
@@ -161,7 +157,8 @@ local function fp(state)
   local x = state.data[{{state.pos, state.pos+params.seq_length}}]
   local y = state.data[{{state.pos+1, state.pos+params.seq_length+1}}]
   
-  model.err = model.rnns:forward({x, y})
+  model.pred = model.rnns:forward(x)
+  model.err = criterion:forward(model.pred, y)
   set_lstm_init(lstm, lstm.hiddenOutput[params.seq_length], lstm.cellOutput[params.seq_length])
 
   return model.err:mean()
@@ -173,7 +170,8 @@ local function bp(state)
   local x = state.data[{{state.pos, state.pos+params.seq_length}}]
   local y = state.data[{{state.pos+1, state.pos+params.seq_length+1}}]
   
-  model.rnns:backward({x, y}, transfer_data(torch.ones(1)))
+  local d_pred = criterion:backward(model.pred, y)
+  model.rnns:backward(x, d_pred)
 
   state.pos = state.pos + params.seq_length
   model.norm_dw = paramdx:norm()
