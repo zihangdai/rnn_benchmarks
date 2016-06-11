@@ -135,7 +135,7 @@ end
 model.rnns = create_network()
 model.rnns:getParameters():uniform(-params.init_weight, params.init_weight)
 
-local criterion = nn.ClassNLLCriterion()
+local criterion = transfer_data(nn.ClassNLLCriterion())
 
 local function reset_state(state)
   set_lstm_init(lstm)
@@ -154,24 +154,25 @@ local function fp(state)
     reset_state(state)
   end
 
-  local x = state.data[{{state.pos, state.pos+params.seq_length}}]
-  local y = state.data[{{state.pos+1, state.pos+params.seq_length+1}}]
+  local x = state.data[{{state.pos, state.pos+params.seq_length-1}}]
+  local y = state.data[{{state.pos+1, state.pos+params.seq_length}}]
   
   model.pred = model.rnns:forward(x)
-  model.err = criterion:forward(model.pred, y)
-  set_lstm_init(lstm, lstm.hiddenOutput[params.seq_length], lstm.cellOutput[params.seq_length])
+  model.err = criterion:forward(model.pred, y:view(-1))
+  set_lstm_init(lstm, lstm.hiddenOutput, lstm.cellOutput)
 
-  return model.err:mean()
+  return model.err
 end
 
 local function bp(state)
   paramdx:zero()
 
-  local x = state.data[{{state.pos, state.pos+params.seq_length}}]
-  local y = state.data[{{state.pos+1, state.pos+params.seq_length+1}}]
+  local x = state.data[{{state.pos, state.pos+params.seq_length-1}}]
+  local y = state.data[{{state.pos+1, state.pos+params.seq_length}}]
   
-  local d_pred = criterion:backward(model.pred, y)
+  local d_pred = criterion:backward(model.pred, y:view(-1))
   model.rnns:backward(x, d_pred)
+  cutorch.synchronize()
 
   state.pos = state.pos + params.seq_length
   model.norm_dw = paramdx:norm()
