@@ -89,7 +89,6 @@ end
 
 local state_train, state_valid, state_test
 local model = {}
-model.rnns = create_network()
 
 local paramx, paramdx
 
@@ -98,17 +97,19 @@ local function create_network()
   local y                = nn.Identity()()
 
   local embedding        = nn.LookupTable(params.vocab_size, params.rnn_size)(x)
-  local lstmout          = cudnn.LSTM(params.rnn_size, params.rnn_size, params.layers)(embedding)
+  local lstmout          = cudnn.LSTM(params.rnn_size, params.rnn_size, params.layers)(nn.Dropout(params.dropout)(embedding))
 
   local dropped          = nn.Dropout(params.dropout)(lstmout)
   local flatten          = nn.View(-1, params.rnn_size)(dropped)
   local pred             = cudnn.LogSoftMax()(nn.Linear(params.rnn_size, params.vocab_size)(flatten))
   local err              = nn.ClassNLLCriterion()({pred, nn.View(-1)(y)})
   local gmodule          = nn.gModule({x, y}, {err})
-  gmodule:getParameters():uniform(-params.init_weight, params.init_weight)
 
   return transfer_data(gmodule)
 end
+
+model.rnns = create_network()
+model.rnns:getParameters():uniform(-params.init_weight, params.init_weight)
 
 local function reset_state(state)
   state.pos = 1
@@ -251,7 +252,7 @@ local function main()
       collectgarbage()
     end
   end
-  run_test()
+  -- run_test()
   print(" Ave wps = " .. wpss:mean())
   print(" Std wps = " .. wpss:std())
 
