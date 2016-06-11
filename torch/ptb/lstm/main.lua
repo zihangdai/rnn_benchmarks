@@ -141,7 +141,7 @@ model.rnns:getParameters():uniform(-params.init_weight, params.init_weight)
 local criterion = transfer_data(nn.ClassNLLCriterion())
 
 local function reset_state(state)
-  set_init_value(lstm)
+  set_init_value(model)
   state.pos = 1
 end
 
